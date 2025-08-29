@@ -25,4 +25,6 @@ type Options struct {
 	FuseAllowNonEmptyMount bool
 	// Use WebDAV even on platforms that support FUSE.
 	PreferWebDAV bool
+	// Enable read-write operations with overlay directory
+	Writable bool
 }
