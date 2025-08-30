@@ -14,6 +14,7 @@ import (
 
 	"github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/internal/fusemount"
+	"github.com/kopia/kopia/internal/overlayfs"
 )
 
 // we're serving read-only filesystem, cache some attributes for 30 seconds.
@@ -61,7 +62,27 @@ func Directory(ctx context.Context, entry fs.Directory, mountPoint string, mount
 		return newPosixWedavController(ctx, entry, mountPoint, isTempDir)
 	}
 
-	rootNode := fusemount.NewDirectoryNode(entry)
+	var rootNode gofusefs.InodeEmbedder
+
+	if mountOptions.Writable {
+		// Create overlay filesystem for writable mount
+		overlayFS, err := overlayfs.New(entry, mountPoint)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to create overlay filesystem")
+		}
+
+		log(ctx).Infof("Writable mount enabled for %s (overlay directory: %s)", mountPoint, overlayFS.GetOverlayPath())
+
+		// Get overlay-aware root directory
+		overlayRoot, err := overlayFS.GetRootDirectory(ctx)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to get overlay root directory")
+		}
+
+		rootNode = fusemount.NewDirectoryNode(overlayRoot)
+	} else {
+		rootNode = fusemount.NewDirectoryNode(entry)
+	}
 
 	fuseServer, err := gofusefs.Mount(mountPoint, rootNode, mountOptions.toFuseMountOptions())
 	if err != nil {
