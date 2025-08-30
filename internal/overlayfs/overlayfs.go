@@ -87,6 +87,9 @@ func (ofs *OverlayFS) getOverlayFile(relativePath string) (fs.Entry, error) {
 	// Check if file exists in overlay and get file info
 	fileInfo, err := os.Stat(overlayPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, os.ErrNotExist
+		}
 		return nil, errors.Wrap(err, "failed to stat overlay file")
 	}
 
@@ -124,7 +127,18 @@ func (ofs *OverlayFS) GetEntry(ctx context.Context, relativePath string) (fs.Ent
 	// 3. Fall back to snapshot
 	log(ctx).Debugf("File not in overlay, checking snapshot: %s", relativePath)
 
-	return ofs.findEntryInSnapshot(ctx, relativePath)
+	entry, err := ofs.findEntryInSnapshot(ctx, relativePath)
+	if err != nil {
+		// Ensure we always return os.ErrNotExist for not found files
+		if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
+			return nil, os.ErrNotExist
+		}
+		// For other errors, still return os.ErrNotExist to avoid EIO in FUSE
+		log(ctx).Debugf("Treating error as not found for %s: %v", relativePath, err)
+		return nil, os.ErrNotExist
+	}
+
+	return entry, nil
 }
 
 // findEntryInSnapshot finds a file entry in the base snapshot by relative path.
@@ -159,6 +173,9 @@ func (ofs *OverlayFS) findEntryInSnapshot(ctx context.Context, relativePath stri
 			// Last component, this should be the file
 			entry, err := current.Child(ctx, component)
 			if err != nil {
+				if os.IsNotExist(err) {
+					return nil, os.ErrNotExist
+				}
 				return nil, errors.Wrapf(err, "failed to find file: %s", component)
 			}
 
@@ -168,6 +185,9 @@ func (ofs *OverlayFS) findEntryInSnapshot(ctx context.Context, relativePath stri
 		// Intermediate component, should be a directory
 		entry, err := current.Child(ctx, component)
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, os.ErrNotExist
+			}
 			return nil, errors.Wrapf(err, "failed to find component: %s", component)
 		}
 
@@ -206,6 +226,12 @@ type overlayFileEntry struct {
 
 func (f *overlayFileEntry) Name() string { return f.name }
 func (f *overlayFileEntry) Size() int64 {
+	// Get fresh file info to ensure accurate size reporting
+	if info, err := os.Stat(f.overlayPath); err == nil {
+		return info.Size()
+	}
+
+	// Fallback to cached fileInfo if stat fails
 	if f.fileInfo != nil {
 		return f.fileInfo.Size()
 	}
@@ -222,6 +248,12 @@ func (f *overlayFileEntry) Mode() os.FileMode {
 }
 
 func (f *overlayFileEntry) ModTime() time.Time {
+	// Get fresh file info to ensure accurate modification time
+	if info, err := os.Stat(f.overlayPath); err == nil {
+		return info.ModTime()
+	}
+
+	// Fallback to cached fileInfo if stat fails
 	if f.fileInfo != nil {
 		return f.fileInfo.ModTime()
 	}
@@ -411,7 +443,23 @@ func (it *overlayDirectoryIterator) buildEntryList(ctx context.Context) {
 	if baseEntry, err := it.ofs.findEntryInSnapshot(ctx, it.relativePath); err == nil {
 		if baseDir, ok := baseEntry.(fs.Directory); ok {
 			err := fs.IterateEntries(ctx, baseDir, func(_ context.Context, entry fs.Entry) error {
-				entryMap[entry.Name()] = entry
+				// Wrap directories to ensure they can be navigated through overlay system
+				if dir, isDir := entry.(fs.Directory); isDir {
+					childRelPath := entry.Name()
+					if it.relativePath != "" {
+						childRelPath = filepath.Join(it.relativePath, entry.Name())
+					}
+
+					wrappedDir := &snapshotDirectoryWrapper{
+						dir:          dir,
+						ofs:          it.ofs,
+						relativePath: childRelPath,
+					}
+					entryMap[entry.Name()] = wrappedDir
+				} else {
+					// Files don't need wrapping
+					entryMap[entry.Name()] = entry
+				}
 				return nil
 			})
 			if err != nil {
@@ -565,4 +613,24 @@ func (ofs *OverlayFS) DeleteFile(relativePath string) error {
 	_ = os.Remove(overlayPath) // Ignore error, file may not exist
 
 	return nil
+}
+
+// CreateDirectory creates a directory in the overlay filesystem.
+func (ofs *OverlayFS) CreateDirectory(path string, mode os.FileMode) error {
+	overlayPath := ofs.getOverlayFilePath(path)
+
+	if err := os.MkdirAll(filepath.Dir(overlayPath), 0o750); err != nil {
+		return errors.Wrap(err, "failed to create parent directories")
+	}
+
+	if err := os.Mkdir(overlayPath, mode); err != nil {
+		return errors.Wrap(err, "failed to create directory")
+	}
+
+	return nil
+}
+
+// getOverlayFilePath returns the path to a file in the overlay filesystem.
+func (ofs *OverlayFS) getOverlayFilePath(path string) string {
+	return filepath.Join(ofs.writtenDir, path)
 }

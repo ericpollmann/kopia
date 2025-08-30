@@ -372,3 +372,82 @@ func TestNestedDirectories(t *testing.T) {
 		t.Errorf("Expected nested overlay content, got '%s'", string(content))
 	}
 }
+
+func TestCreateDirectory(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "overlayfs-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mockDir := mockfs.NewDirectory()
+	mountPoint := filepath.Join(tempDir, "mount")
+	if err := os.Mkdir(mountPoint, 0o755); err != nil {
+		t.Fatalf("Failed to create mount point: %v", err)
+	}
+
+	overlayFS, err := New(mockDir, mountPoint)
+	if err != nil {
+		t.Fatalf("Failed to create overlay filesystem: %v", err)
+	}
+
+	// Test creating directory
+	err = overlayFS.CreateDirectory("newdir", 0o755)
+	if err != nil {
+		t.Fatalf("Failed to create directory: %v", err)
+	}
+
+	// Verify directory was created in overlay
+	expectedDirPath := filepath.Join(overlayFS.writtenDir, "newdir")
+	if stat, err := os.Stat(expectedDirPath); err != nil {
+		t.Fatalf("Expected directory not found: %v", err)
+	} else if !stat.IsDir() {
+		t.Errorf("Expected path to be a directory")
+	}
+
+	// Test nested directory creation
+	err = overlayFS.CreateDirectory("parent/child", 0o755)
+	if err != nil {
+		t.Fatalf("Failed to create nested directory: %v", err)
+	}
+
+	expectedNestedPath := filepath.Join(overlayFS.writtenDir, "parent/child")
+	if stat, err := os.Stat(expectedNestedPath); err != nil {
+		t.Fatalf("Expected nested directory not found: %v", err)
+	} else if !stat.IsDir() {
+		t.Errorf("Expected nested path to be a directory")
+	}
+}
+
+func TestGetOverlayFilePath(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "overlayfs-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mockDir := mockfs.NewDirectory()
+	mountPoint := filepath.Join(tempDir, "mount")
+	if err := os.Mkdir(mountPoint, 0o755); err != nil {
+		t.Fatalf("Failed to create mount point: %v", err)
+	}
+
+	overlayFS, err := New(mockDir, mountPoint)
+	if err != nil {
+		t.Fatalf("Failed to create overlay filesystem: %v", err)
+	}
+
+	// Test getting overlay path for root file
+	path := overlayFS.getOverlayFilePath("test.txt")
+	expected := filepath.Join(overlayFS.writtenDir, "test.txt")
+	if path != expected {
+		t.Errorf("Expected path %s, got %s", expected, path)
+	}
+
+	// Test getting overlay path for nested file
+	nestedPath := overlayFS.getOverlayFilePath("dir/nested/file.txt")
+	expectedNested := filepath.Join(overlayFS.writtenDir, "dir/nested/file.txt")
+	if nestedPath != expectedNested {
+		t.Errorf("Expected nested path %s, got %s", expectedNested, nestedPath)
+	}
+}

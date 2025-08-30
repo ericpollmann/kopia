@@ -30,9 +30,19 @@ func (mo *Options) toFuseMountOptions() *gofusefs.Options {
 			FsName:     "kopia",
 			Debug:      os.Getenv("KOPIA_DEBUG_FUSE") != "",
 		},
-		EntryTimeout:    &cacheTimeout,
-		AttrTimeout:     &cacheTimeout,
-		NegativeTimeout: &cacheTimeout,
+	}
+
+	if mo.Writable {
+		// Disable caching for writable mounts to ensure changes are visible immediately
+		noCacheTimeout := time.Duration(0)
+		o.EntryTimeout = &noCacheTimeout
+		o.AttrTimeout = &noCacheTimeout
+		o.NegativeTimeout = &noCacheTimeout
+	} else {
+		o.Options = append(o.Options, "ro")
+		o.EntryTimeout = &cacheTimeout
+		o.AttrTimeout = &cacheTimeout
+		o.NegativeTimeout = &cacheTimeout
 	}
 
 	o.Options = append(o.Options, "noatime")
@@ -79,7 +89,8 @@ func Directory(ctx context.Context, entry fs.Directory, mountPoint string, mount
 			return nil, errors.Wrap(err, "failed to get overlay root directory")
 		}
 
-		rootNode = fusemount.NewDirectoryNode(overlayRoot)
+		// Use writable node that supports FUSE write operations
+		rootNode = overlayfs.NewWritableDirectoryNode(overlayRoot, overlayFS, "")
 	} else {
 		rootNode = fusemount.NewDirectoryNode(entry)
 	}
